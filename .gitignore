@@ -1,0 +1,8 @@
+node_modules/
+downloads/
+.env
+*.key.json
+*.pem
+npm-debug.log
+dist/
+.DS_Store

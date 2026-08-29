@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Torrent Proxy Client</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 20px; }
+      .file-list { margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Torrent Proxy</h1>
+    <p>Upload a .torrent file and download files when ready.</p>
+
+    <input type="file" id="torrentFile" accept=".torrent" />
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Torrent Proxy Client</title>
+        <style>
+          body { font-family: Arial, sans-serif; padding: 20px; max-width: 900px; margin: auto; }
+          header { display:flex; align-items:center; justify-content:space-between; }
+          .uploader { margin-top: 20px; }
+          .torrents { margin-top: 20px; }
+          .torrent { border: 1px solid #ddd; padding: 12px; margin-bottom: 12px; border-radius:6px; }
+          .progress { height: 12px; background:#f1f1f1; border-radius:6px; overflow:hidden; }
+          .progress > i { display:block; height:100%; background:linear-gradient(90deg,#4caf50,#8bc34a); }
+          .files { margin-top:8px; }
+          button { cursor:pointer; }
+          .muted { color:#666; font-size:0.9em }
+        </style>
+      </head>
+      <body>
+        <header>
+          <h1>Torrent Proxy</h1>
+          <div class="muted">Upload .torrent → download files via signed URLs</div>
+        </header>
+
+        <div id="root"></div>
+
+        <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+        <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+        <script>
+          const { useState, useEffect, useRef } = React;
+          const serverBase = location.origin.replace(/:\/\/(.*):\d+/, '://localhost:3000') || 'http://localhost:3000';
+
+          function formatBytes(n) {
+            if (!n) return '0 B';
+            const units = ['B','KB','MB','GB'];
+            let u = 0;
+            while (n >= 1024 && u < units.length-1) { n/=1024; u++; }
+            return n.toFixed(2)+' '+units[u];
+          }
+
+          function App(){
+            const [torrents, setTorrents] = useState([]); // {infoHash,name,progress,done,files,downloadSpeed,numPeers}
+            const [uploading, setUploading] = useState(false);
+            const fileRef = useRef(null);
+
+            useEffect(()=>{
+              const id = setInterval(()=>{
+                // poll all known torrents
+                torrents.forEach(t => fetchStatus(t.infoHash));
+              }, 3000);
+              return ()=>clearInterval(id);
+            }, [torrents]);
+
+            async function fetchStatus(infoHash){
+              try{
+                const resp = await fetch(`${serverBase}/status/${infoHash}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                setTorrents(prev=>prev.map(p=>p.infoHash===infoHash?{...p,...data}:p));
+              }catch(e){ console.warn('status err',e); }
+            }
+
+            async function handleUpload(){
+              const f = fileRef.current.files[0];
+              if (!f) return alert('Select a .torrent file');
+              setUploading(true);
+              const fd = new FormData(); fd.append('torrent', f);
+              try{
+                const resp = await fetch(`${serverBase}/upload`, { method:'POST', body: fd });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || 'Upload failed');
+                const newT = { infoHash: data.infoHash, name: data.name || f.name, progress:0, done:false, files: data.files || [] };
+                setTorrents(prev=>[newT, ...prev]);
+                // immediately poll status once
+                fetchStatus(newT.infoHash);
+              }catch(err){ alert('Upload error: '+err.message); }
+              finally{ setUploading(false); fileRef.current.value = null; }
+            }
+
+            return React.createElement('div', null,
+              React.createElement('div', { className: 'uploader' },
+                React.createElement('input', { type:'file', accept:'.torrent', ref: fileRef }),
+                React.createElement('button', { onClick: handleUpload, disabled: uploading, style:{marginLeft:8} }, uploading ? 'Uploading...' : 'Upload')
+              ),
+              React.createElement('div', { className: 'torrents' },
+                torrents.length===0 && React.createElement('div', { className: 'muted' }, 'No uploads yet'),
+                torrents.map(t=>React.createElement(TorrentCard, { key: t.infoHash, t }))
+              )
+            );
+          }
+
+          function TorrentCard({t}){
+            const pct = t.progress || 0;
+            return React.createElement('div', { className: 'torrent' },
+              React.createElement('div', null, React.createElement('strong', null, t.name || t.infoHash)),
+              React.createElement('div', { style:{marginTop:6} },
+                React.createElement('div', { className: 'progress' }, React.createElement('i', { style:{width: pct+'%'} }))
+              ),
+              React.createElement('div', { style:{marginTop:6} }, `${pct}% — Peers: ${t.numPeers||0} — ${t.downloadSpeed?formatBytes(t.downloadSpeed)+'/s':''}`),
+              t.files && t.files.length>0 && React.createElement('div', { className: 'files' },
+                React.createElement('ul', null, t.files.map(f=>React.createElement('li', { key: f.index },
+                  React.createElement('a', { href: f.signedUrl || (`${serverBase}/download/${t.infoHash}/${f.index}`), target:'_blank' }, `${f.name} (${formatBytes(f.length)})`)
+                )))
+              )
+            );
+          }
+
+          ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+        </script>
+      </body>
+    </html>
