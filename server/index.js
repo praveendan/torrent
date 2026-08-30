@@ -45,10 +45,23 @@ app.post('/upload', upload.single('torrent'), (req, res) => {
 
     torrents[infoHash] = { torrent, filesSaved: [], done: false };
 
+    // Wait for metadata (file list) to be ready before responding
+    torrent.on('ready', () => {
+      // Stream each file to disk (webtorrent will also write to path if provided)
+      torrent.files.forEach((file, idx) => {
+        const outPath = path.join(DOWNLOADS_DIR, infoHash + '_' + idx + '_' + file.name.replace(/[/\\]/g, '_'));
+        const writeStream = fs.createWriteStream(outPath);
+        file.createReadStream().pipe(writeStream);
+        torrents[infoHash].filesSaved.push({ name: file.name, path: outPath, index: idx, length: file.length });
+      });
+
+      res.json({ infoHash, name: torrent.name, files: torrents[infoHash].filesSaved });
+    });
+
+    // Handle torrent completion and upload to GCS when done
     torrent.on('done', () => {
       (async () => {
         try {
-          // upload each saved file to GCS if enabled
           if (storage && GCS_BUCKET) {
             for (const f of torrents[infoHash].filesSaved) {
               try {
@@ -70,16 +83,6 @@ app.post('/upload', upload.single('torrent'), (req, res) => {
         }
       })();
     });
-
-    // Stream each file to disk (webtorrent will already write to path if provided)
-    torrent.files.forEach((file, idx) => {
-      const outPath = path.join(DOWNLOADS_DIR, infoHash + '_' + idx + '_' + file.name.replace(/[/\\]/g, '_'));
-      const writeStream = fs.createWriteStream(outPath);
-      file.createReadStream().pipe(writeStream);
-      torrents[infoHash].filesSaved.push({ name: file.name, path: outPath, index: idx, length: file.length });
-    });
-
-    res.json({ infoHash, name: torrent.name, files: torrents[infoHash].filesSaved });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to add torrent' });
