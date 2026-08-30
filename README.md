@@ -43,6 +43,8 @@ npm start
 
 The server will upload completed files to `gs://your-bucket-name/<infoHash>/...` and include signed download URLs (24h expiry) in the `/status/:infoHash` response. The frontend will use those signed URLs when available.
 
+If the frontend is hosted separately from the Node API (for example, in a static bucket), set `window.TORRENT_PROXY_API_URL` before loading the app, or update the client to point at your backend URL. This avoids the hardcoded localhost default and allows the browser to download directly from GCS once the signed link is available.
+
 Docker / Local testing
 ----------------------
 
