@@ -35,6 +35,49 @@ if (GCS_BUCKET) {
   console.log('GCS_BUCKET not set - GCS upload disabled');
 }
 
+async function uploadFileToGcs(infoHash, fileMeta) {
+  if (!storage || !GCS_BUCKET || !fileMeta || !fileMeta.path) return null;
+
+  const bucket = storage.bucket(GCS_BUCKET);
+  const dest = `${infoHash}/${path.basename(fileMeta.path)}`;
+
+  await bucket.upload(fileMeta.path, { destination: dest });
+
+  const fileHandle = bucket.file(dest);
+  const [signedUrl] = await fileHandle.getSignedUrl({
+    action: 'read',
+    expires: Date.now() + 24 * 60 * 60 * 1000
+  });
+
+  fileMeta.gcs = {
+    destination: dest,
+    signedUrl,
+    bucket: GCS_BUCKET,
+    uploadedAt: new Date().toISOString()
+  };
+
+  return fileMeta.gcs;
+}
+
+async function syncTorrentToGcs(infoHash) {
+  const entry = torrents[infoHash];
+  if (!entry || !storage || !GCS_BUCKET) return;
+
+  entry.gcsUploading = true;
+  try {
+    for (const fileMeta of entry.filesSaved) {
+      try {
+        await uploadFileToGcs(infoHash, fileMeta);
+      } catch (e) {
+        console.error('GCS upload error for file', fileMeta.path, e);
+      }
+    }
+  } finally {
+    entry.gcsUploading = false;
+    entry.done = true;
+  }
+}
+
 app.post('/upload', upload.single('torrent'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No torrent file uploaded' });
 
@@ -62,23 +105,9 @@ app.post('/upload', upload.single('torrent'), (req, res) => {
     torrent.on('done', () => {
       (async () => {
         try {
-          if (storage && GCS_BUCKET) {
-            for (const f of torrents[infoHash].filesSaved) {
-              try {
-                const localPath = f.path;
-                const dest = `${infoHash}/${path.basename(localPath)}`;
-                await storage.bucket(GCS_BUCKET).upload(localPath, { destination: dest });
-                const fileHandle = storage.bucket(GCS_BUCKET).file(dest);
-                const [signedUrl] = await fileHandle.getSignedUrl({ action: 'read', expires: Date.now() + 24 * 60 * 60 * 1000 });
-                f.gcs = { destination: dest, signedUrl };
-              } catch (e) {
-                console.error('GCS upload error for file', f.path, e);
-              }
-            }
-          }
+          await syncTorrentToGcs(infoHash);
         } catch (e) {
           console.error('Error in done handler', e);
-        } finally {
           torrents[infoHash].done = true;
         }
       })();
@@ -102,11 +131,18 @@ app.get('/status/:infoHash', (req, res) => {
     downloadSpeed: torrent.downloadSpeed,
     numPeers: torrent.numPeers,
     done: entry.done,
-    files: entry.filesSaved.map(f => ({ name: f.name, index: f.index, length: f.length, signedUrl: f.gcs ? f.gcs.signedUrl : null }))
+    gcsUploading: !!entry.gcsUploading,
+    files: entry.filesSaved.map(f => ({
+      name: f.name,
+      index: f.index,
+      length: f.length,
+      signedUrl: f.gcs ? f.gcs.signedUrl : null,
+      gcsDestination: f.gcs ? f.gcs.destination : null
+    }))
   });
 });
 
-app.get('/download/:infoHash/:fileIndex', (req, res) => {
+app.get('/download/:infoHash/:fileIndex', async (req, res) => {
   const { infoHash, fileIndex } = req.params;
   const entry = torrents[infoHash];
   if (!entry) return res.status(404).send('Unknown torrent');
@@ -118,9 +154,23 @@ app.get('/download/:infoHash/:fileIndex', (req, res) => {
   const torrent = entry.torrent;
   const file = torrent.files[idx];
   if (!file) return res.status(404).send('File missing in torrent object');
-  // If we have a signed GCS URL, redirect to it to offload bandwidth
+
+  // Prefer the signed URL so the browser downloads directly from GCS without
+  // passing the file through the Node server.
   if (fileMeta.gcs && fileMeta.gcs.signedUrl) {
     return res.redirect(fileMeta.gcs.signedUrl);
+  }
+
+  if (fileMeta.gcs && fileMeta.gcs.destination) {
+    try {
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(file.name)}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+
+      const remoteFile = storage.bucket(GCS_BUCKET).file(fileMeta.gcs.destination);
+      return remoteFile.createReadStream().pipe(res);
+    } catch (e) {
+      console.error('Failed to stream from GCS', e);
+    }
   }
 
   res.setHeader('Content-Disposition', `attachment; filename="${path.basename(file.name)}"`);
